@@ -2,8 +2,9 @@
 // It is not part of the official standard but it assumed to be
 // very similar to how many NFTs would implement the core functionality.
 
-import NonFungibleToken from "./NonFungibleToken.cdc"
-import MetadataViews from "./MetadataViews.cdc"
+import NonFungibleToken from 0xf8d6e0586b0a20c7
+import ConstrainedOwnership from 0xf8d6e0586b0a20c7
+import MetadataViews from 0xf8d6e0586b0a20c7
 
 pub contract ExampleNFT: NonFungibleToken {
 
@@ -77,13 +78,50 @@ pub contract ExampleNFT: NonFungibleToken {
         }
     }
 
-    pub resource Collection: ExampleNFTCollectionPublic, NonFungibleToken.Provider, NonFungibleToken.Receiver, NonFungibleToken.CollectionPublic, MetadataViews.ResolverCollection {
+    pub resource Collection: ExampleNFTCollectionPublic, NonFungibleToken.Provider, NonFungibleToken.Receiver, NonFungibleToken.CollectionPublic, ConstrainedOwnership.AcceptsSeizable, MetadataViews.ResolverCollection {
         // dictionary of NFT conforming tokens
         // NFT is a resource type with an `UInt64` ID field
         pub var ownedNFTs: @{UInt64: NonFungibleToken.NFT}
 
+        // NFTs that can be seized by an external account (lender) in case of default
+        access(contract) var seizableNFTs: @{UInt64: NonFungibleToken.NFT}
+        access(contract) var seizableBy: {UInt64: Address}
+
         init () {
             self.ownedNFTs <- {}
+            self.seizableNFTs <- {}
+            self.seizableBy = {}
+        }
+
+        // deposit an NFT which can be seized by the sender
+        // (the conditions under which this can happen are defined in the lending contract)
+        pub fun depositSeizable(from: AuthAccount, token: @NonFungibleToken.NFT) {
+            let token <- token as! @ExampleNFT.NFT
+            let id: UInt64 = token.id
+            let oldToken <- self.seizableNFTs[id] <- token
+            self.seizableBy[id] = from.address
+            destroy oldToken
+        }
+
+        // claim an asset back by the lender (after a default of payment)
+        pub fun seize(from: AuthAccount, seizeID: UInt64): @NonFungibleToken.NFT {
+            if self.seizableBy[seizeID] == nil || self.seizableBy[seizeID] != from.address {
+                panic("The caller has no rights to seize this asset")
+            }
+            let token <- self.seizableNFTs.remove(key: seizeID) ?? panic("missing NFT")
+            return <-token
+        }
+
+        // release the constraint after the loan has been fully repaid
+        // now we have full ownership of the asset
+        pub fun releaseConstraint(from: AuthAccount, id: UInt64) {
+            if self.seizableBy[id] == nil || self.seizableBy[id] != from.address {
+                panic("The caller has no rights to release a constraint on this asset")
+            }
+            self.seizableBy.remove(key: id)
+            let token <- self.seizableNFTs.remove(key: id) ?? panic("missing NFT")
+            let oldToken <- self.ownedNFTs[id] <- token
+            destroy oldToken
         }
 
         // withdraw removes an NFT from the collection and moves it to the caller
@@ -112,13 +150,17 @@ pub contract ExampleNFT: NonFungibleToken {
 
         // getIDs returns an array of the IDs that are in the collection
         pub fun getIDs(): [UInt64] {
-            return self.ownedNFTs.keys
+            return self.ownedNFTs.keys.concat(self.seizableNFTs.keys)
         }
 
         // borrowNFT gets a reference to an NFT in the collection
         // so that the caller can read its metadata and call its methods
         pub fun borrowNFT(id: UInt64): &NonFungibleToken.NFT {
-            return &self.ownedNFTs[id] as &NonFungibleToken.NFT
+            if self.ownedNFTs.containsKey(id) {
+                return &self.ownedNFTs[id] as &NonFungibleToken.NFT
+            } else {
+                return &self.seizableNFTs[id] as &NonFungibleToken.NFT
+            }
         }
  
         pub fun borrowExampleNFT(id: UInt64): &ExampleNFT.NFT? {
@@ -126,19 +168,32 @@ pub contract ExampleNFT: NonFungibleToken {
                 // Create an authorized reference to allow downcasting
                 let ref = &self.ownedNFTs[id] as auth &NonFungibleToken.NFT
                 return ref as! &ExampleNFT.NFT
+            } else if self.seizableNFTs[id] != nil {
+                let ref = &self.seizableNFTs[id] as auth &NonFungibleToken.NFT
+                return ref as! &ExampleNFT.NFT
             }
 
             return nil
         }
 
         pub fun borrowViewResolver(id: UInt64): &AnyResource{MetadataViews.Resolver} {
-            let nft = &self.ownedNFTs[id] as auth &NonFungibleToken.NFT
-            let exampleNFT = nft as! &ExampleNFT.NFT
-            return exampleNFT as &AnyResource{MetadataViews.Resolver}
+            if self.ownedNFTs[id] != nil {
+                let nft = &self.ownedNFTs[id] as auth &NonFungibleToken.NFT
+                let exampleNFT = nft as! &ExampleNFT.NFT
+                return exampleNFT
+            } else {
+                let nft = &self.seizableNFTs[id] as auth &NonFungibleToken.NFT
+                let exampleNFT = nft as! &ExampleNFT.NFT
+                return exampleNFT
+            }
         }
 
         destroy() {
+            if (self.seizableNFTs.length > 0) {
+                panic("Cannot destroy a collection containing seizable items.")
+            }
             destroy self.ownedNFTs
+            destroy self.seizableNFTs
         }
     }
 
@@ -192,7 +247,7 @@ pub contract ExampleNFT: NonFungibleToken {
         self.account.save(<-collection, to: self.CollectionStoragePath)
 
         // create a public capability for the collection
-        self.account.link<&ExampleNFT.Collection{NonFungibleToken.CollectionPublic, ExampleNFT.ExampleNFTCollectionPublic}>(
+        self.account.link<&ExampleNFT.Collection{NonFungibleToken.CollectionPublic, ExampleNFT.ExampleNFTCollectionPublic, ConstrainedOwnership.AcceptsSeizable}>(
             self.CollectionPublicPath,
             target: self.CollectionStoragePath
         )
