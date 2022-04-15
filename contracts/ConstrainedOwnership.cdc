@@ -24,5 +24,20 @@ pub contract ConstrainedOwnership {
         // release the constraint after the loan has been fully repaid
         // now we have full ownership of the asset
         pub fun releaseConstraint(from: AuthAccount, id: UInt64)
+
+        // check if the collection is correctly linked
+        pub fun checkUse():  Bool
+
+        // if it is not, make it unusable
+        pub fun getIDs(): [UInt64] {
+            pre {
+                self.checkUse(): "Collection unusable"
+            }
+        }
+        pub fun borrowNFT(id: UInt64): &NonFungibleToken.NFT {
+            pre {
+                self.checkUse(): "Collection unusable"
+            }
+        }
     }
 }

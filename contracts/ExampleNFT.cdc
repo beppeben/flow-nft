@@ -87,10 +87,29 @@ pub contract ExampleNFT: NonFungibleToken {
         access(contract) var seizableNFTs: @{UInt64: NonFungibleToken.NFT}
         access(contract) var seizableBy: {UInt64: Address}
 
+        // store capability to the collection to check that it doesn't get unlinked
+        access(self) var capabilityCheck: Capability<&ExampleNFT.Collection{ConstrainedOwnership.AcceptsSeizable}>?
+        access(self) var capabilityInit: Bool
+
         init () {
             self.ownedNFTs <- {}
             self.seizableNFTs <- {}
             self.seizableBy = {}
+            self.capabilityCheck = nil
+            self.capabilityInit = false
+        }
+
+        // initialize link to the collection (can be done only once)
+        pub fun initCapability(cap: Capability<&ExampleNFT.Collection{ConstrainedOwnership.AcceptsSeizable}>) {
+            if !self.capabilityInit {
+                self.capabilityCheck = cap
+                self.capabilityInit = true
+            }
+        }
+
+        // check if the collection is correctly linked
+        pub fun checkUse(): Bool {
+            return self.capabilityCheck != nil && self.capabilityCheck!.borrow() != nil
         }
 
         // deposit an NFT which can be seized by the sender
@@ -242,15 +261,16 @@ pub contract ExampleNFT: NonFungibleToken {
         self.CollectionPublicPath = /public/exampleNFTCollection
         self.MinterStoragePath = /storage/exampleNFTMinter
 
-        // Create a Collection resource and save it to storage
-        let collection <- create Collection()
-        self.account.save(<-collection, to: self.CollectionStoragePath)
-
         // create a public capability for the collection
-        self.account.link<&ExampleNFT.Collection{NonFungibleToken.CollectionPublic, ExampleNFT.ExampleNFTCollectionPublic, ConstrainedOwnership.AcceptsSeizable}>(
+        let cap = self.account.link<&ExampleNFT.Collection{NonFungibleToken.CollectionPublic, ExampleNFT.ExampleNFTCollectionPublic, ConstrainedOwnership.AcceptsSeizable}>(
             self.CollectionPublicPath,
             target: self.CollectionStoragePath
         )
+
+        // Create a Collection resource and save it to storage
+        let collection <- create Collection()
+        collection.initCapability(cap: cap!)
+        self.account.save(<-collection, to: self.CollectionStoragePath)
 
         // Create a Minter resource and save it to storage
         let minter <- create NFTMinter()
