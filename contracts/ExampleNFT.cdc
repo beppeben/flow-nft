@@ -6,7 +6,7 @@ import NonFungibleToken from 0xf8d6e0586b0a20c7
 import ConstrainedOwnership from 0xf8d6e0586b0a20c7
 import MetadataViews from 0xf8d6e0586b0a20c7
 
-pub contract ExampleNFT: NonFungibleToken {
+pub contract ExampleNFT: NonFungibleToken, ConstrainedOwnership {
 
     pub var totalSupply: UInt64
 
@@ -78,6 +78,15 @@ pub contract ExampleNFT: NonFungibleToken {
         }
     }
 
+    // key to be used to seize or release the asset
+    pub resource SeizeKey {
+        pub let id: UInt64
+
+        init(id: UInt64) {
+            self.id = id
+        }
+    }
+
     pub resource Collection: ExampleNFTCollectionPublic, NonFungibleToken.Provider, NonFungibleToken.Receiver, NonFungibleToken.CollectionPublic, ConstrainedOwnership.AcceptsSeizable, MetadataViews.ResolverCollection {
         // dictionary of NFT conforming tokens
         // NFT is a resource type with an `UInt64` ID field
@@ -85,61 +94,51 @@ pub contract ExampleNFT: NonFungibleToken {
 
         // NFTs that can be seized by an external account (lender) in case of default
         access(contract) var seizableNFTs: @{UInt64: NonFungibleToken.NFT}
-        access(contract) var seizableBy: {UInt64: Address}
 
+        // if the collection enables constrained ownership, then
         // store capability to the collection to check that it doesn't get unlinked
-        access(self) var capabilityCheck: Capability<&ExampleNFT.Collection{ConstrainedOwnership.AcceptsSeizable}>?
-        access(self) var capabilityInit: Bool
+        access(self) var seizeCap: Capability<&ExampleNFT.Collection{ConstrainedOwnership.AcceptsSeizable}>?
 
-        init () {
+        init (seizeCap: Capability<&ExampleNFT.Collection{ConstrainedOwnership.AcceptsSeizable}>?) {
             self.ownedNFTs <- {}
             self.seizableNFTs <- {}
-            self.seizableBy = {}
-            self.capabilityCheck = nil
-            self.capabilityInit = false
+            self.seizeCap = seizeCap
         }
 
-        // initialize link to the collection (can be done only once)
-        pub fun initCapability(cap: Capability<&ExampleNFT.Collection{ConstrainedOwnership.AcceptsSeizable}>) {
-            if !self.capabilityInit {
-                self.capabilityCheck = cap
-                self.capabilityInit = true
-            }
-        }
-
-        // check if the collection is correctly linked
+        // check if the collection is not frozen
+        // (if it supports constrained ownership then it needs to be correctly linked)
         pub fun checkUse(): Bool {
-            return self.capabilityCheck != nil && self.capabilityCheck!.borrow() != nil
+            return (self.seizeCap != nil && self.seizeCap!.borrow() != nil) || self.seizableNFTs.length == 0
         }
 
         // deposit an NFT which can be seized by the sender
         // (the conditions under which this can happen are defined in the lending contract)
-        pub fun depositSeizable(from: AuthAccount, token: @NonFungibleToken.NFT) {
+        // returns a key to be used to seize the asset or release the constraint
+        pub fun depositSeizable(token: @NonFungibleToken.NFT): @AnyResource {
             let token <- token as! @ExampleNFT.NFT
             let id: UInt64 = token.id
             let oldToken <- self.seizableNFTs[id] <- token
-            self.seizableBy[id] = from.address
             destroy oldToken
+            return <- create ExampleNFT.SeizeKey(id: id)
         }
 
+        
         // claim an asset back by the lender (after a default of payment)
-        pub fun seize(from: AuthAccount, seizeID: UInt64): @NonFungibleToken.NFT {
-            if self.seizableBy[seizeID] == nil || self.seizableBy[seizeID] != from.address {
-                panic("The caller has no rights to seize this asset")
-            }
-            let token <- self.seizableNFTs.remove(key: seizeID) ?? panic("missing NFT")
+        pub fun seize(key: @AnyResource): @NonFungibleToken.NFT {
+            let castKey <- key as! @ExampleNFT.SeizeKey
+            let token <- self.seizableNFTs.remove(key: castKey.id) ?? panic("missing NFT")
+            destroy castKey
             return <-token
         }
+        
 
         // release the constraint after the loan has been fully repaid
         // now we have full ownership of the asset
-        pub fun releaseConstraint(from: AuthAccount, id: UInt64) {
-            if self.seizableBy[id] == nil || self.seizableBy[id] != from.address {
-                panic("The caller has no rights to release a constraint on this asset")
-            }
-            self.seizableBy.remove(key: id)
-            let token <- self.seizableNFTs.remove(key: id) ?? panic("missing NFT")
-            let oldToken <- self.ownedNFTs[id] <- token
+        pub fun releaseConstraint(key: @AnyResource) {
+            let castKey <- key as! @ExampleNFT.SeizeKey
+            let token <- self.seizableNFTs.remove(key: castKey.id) ?? panic("missing NFT")
+            let oldToken <- self.ownedNFTs[castKey.id] <- token
+            destroy castKey
             destroy oldToken
         }
 
@@ -218,7 +217,12 @@ pub contract ExampleNFT: NonFungibleToken {
 
     // public function that anyone can call to create a new empty collection
     pub fun createEmptyCollection(): @NonFungibleToken.Collection {
-        return <- create Collection()
+        return <- create Collection(seizeCap: nil)
+    }
+
+    pub fun createEmptySeizableCollection(seizeCap: Capability<&AnyResource{ConstrainedOwnership.AcceptsSeizable}>?): @NonFungibleToken.Collection {
+        return <- create Collection(
+          seizeCap: seizeCap as! Capability<&ExampleNFT.Collection{ConstrainedOwnership.AcceptsSeizable}>?)
     }
 
     // Resource that an admin or something similar would own to be
@@ -268,8 +272,7 @@ pub contract ExampleNFT: NonFungibleToken {
         )
 
         // Create a Collection resource and save it to storage
-        let collection <- create Collection()
-        collection.initCapability(cap: cap!)
+        let collection <- create Collection(seizeCap: cap!)
         self.account.save(<-collection, to: self.CollectionStoragePath)
 
         // Create a Minter resource and save it to storage

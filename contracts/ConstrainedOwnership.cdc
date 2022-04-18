@@ -6,7 +6,7 @@
 
 import NonFungibleToken from 0xf8d6e0586b0a20c7
 
-pub contract ConstrainedOwnership {
+pub contract interface ConstrainedOwnership {
 
     // A collection implementing this interface accepts the deposit of NFTs
     // which can be claimed back by the sender under certain conditions
@@ -16,14 +16,15 @@ pub contract ConstrainedOwnership {
     pub resource interface AcceptsSeizable {
         // deposit an NFT which can be seized by the sender
         // (the conditions under which this can happen are defined in the lending contract)
-        pub fun depositSeizable(from: AuthAccount, token: @NonFungibleToken.NFT)
-
-        // claim an asset back by the lender (after a default of payment)
-        pub fun seize(from: AuthAccount, seizeID: UInt64): @NonFungibleToken.NFT
+        // returns a key to be used to seize the asset or release the constraint
+        pub fun depositSeizable(token: @NonFungibleToken.NFT): @AnyResource
 
         // release the constraint after the loan has been fully repaid
         // now we have full ownership of the asset
-        pub fun releaseConstraint(from: AuthAccount, id: UInt64)
+        pub fun releaseConstraint(key: @AnyResource)
+
+        // claim an asset back by the lender (after a default of payment)
+        pub fun seize(key: @AnyResource): @NonFungibleToken.NFT
 
         // check if the collection is correctly linked
         pub fun checkUse():  Bool
@@ -39,5 +40,18 @@ pub contract ConstrainedOwnership {
                 self.checkUse(): "Collection unusable"
             }
         }
+    }
+
+    // createEmptyCollection creates an empty Collection
+    // and returns it to the caller so that they can own NFTs
+    pub fun createEmptySeizableCollection(seizeCap: Capability<&AnyResource{AcceptsSeizable}>?): @NonFungibleToken.Collection {
+        post {
+            result.getIDs().length == 0: "The created collection must be empty!"
+        }
+    }
+
+    // key to be used to seize or release the asset
+    pub resource SeizeKey {
+        pub let id: UInt64
     }
 }
